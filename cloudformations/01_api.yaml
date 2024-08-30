@@ -1,0 +1,262 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS SAM template with a simple API definition
+
+Parameters:
+  BranchName:
+    Type: String
+    Description: The name of the GitHub branch used to create this stack. To be overridden in deploy function. 
+    Default: dev
+  
+  EnvironmentType:
+    Type: String
+    Description: The environment type for which this is being deployed into. Specified in parameter overrides.
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+      - stage
+    ConstraintDescription: "Must be dev, prod, or stage."
+
+  AlarmEmail:
+    Default: "{{resolve:ssm:email_address:1}}"
+    Description: "Email address to notify of operational issues"
+    Type: "String"
+
+Conditions:
+  IsProd: !Equals [ !Ref EnvironmentType, prod]
+  IsDev: !Equals [ !Ref EnvironmentType, dev]
+
+Mappings:
+  EnvConfig:
+    # DynamoDB
+    dev:
+      DeletionProtectionEnabled: false
+    prod:
+      DeletionProtectionEnabled: true
+    # S3 Buckets
+    # Lambda
+    # 
+
+
+Resources:
+
+# S3
+
+# Remove GuardDuty Feature on this iteration.
+  # Need rules to:
+  ## If tagged as THREATS_FOUND delete after 1 day
+  ## If tagged as 4kFalse, delete after 1 day
+  ## If tagged as NO_THREATS_FOUND and nothing else, delete after 3 days
+  ## If tagged as 4kTrue and nothing else, delete after 3 days
+  ## If tagged with both: NO_THREATS_FOUND and 4kTrue, delete after 3 days
+
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # AccessControl: --> Legacy, likely not needed. 
+      BucketEncryption:
+           ServerSideEncryptionConfiguration:
+                - ServerSideEncryptionByDefault:
+                       SSEAlgorithm: AES256
+      LifecycleConfiguration:
+           Rules:
+                - Id: "DeleteContentAfter1Day"
+                  Status: 'Enabled'
+                  # Prefix: '' --> Specifies prefix of objecs to enact this rule on. Likely not needed if null. 
+                  ExpirationInDays: 1
+                  TagFilters:
+                    - Key: "Is4k"
+                      Value: "False"
+                - Id: "DeleteContentAfter3Days"
+                  Status: 'Enabled'
+                  # Prefix: '' --> Specifies prefix of objecs to enact this rule on. Likely not needed if null. 
+                  ExpirationInDays: 3
+                  TagFilters:
+                    - Key: "Is4k"
+                      Value: "True"
+
+
+# DynamoDB
+
+  UserEmailDDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      DeletionProtectionEnabled: !FindInMap [ EnvConfig, !Ref EnvironmentType, DeletionProtectionEnabled]
+      TableName: !Sub "${AWS::StackName}-email-list"
+      AttributeDefinitions:
+        - 
+          AttributeName: "user_id"
+          AttributeType: "S"
+
+      KeySchema:
+        - 
+          AttributeName: "user_id"
+          KeyType: "HASH"   # Partition Key
+
+      ProvisionedThroughput: 
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      
+      Tags:
+        - Key: name
+          Value: dyanmodbtable 
+
+
+# API Gateway
+
+  ApiGatewayApi:
+  # This creates the rest API and sets the name of the stage to the Environment Type
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref EnvironmentType
+  
+
+
+# Lambda Function
+  ApiFunction: 
+    Type: AWS::Serverless::Function
+    Properties:
+      Events:
+        Root:
+          Type: Api
+          Properties:
+            Path: /
+            Method: ANY
+            RestApiId: !Ref ApiGatewayApi
+
+      Role: !GetAtt VideoConverter-IAMExecutionRole.Arn
+      Runtime: python3.10
+      Handler: index.handler
+      CodeUri: ../api/ 
+      LoggingConfig:
+        LogGroup: !Ref ApiRootLogs
+
+  GetSignedURLFunction:
+    # https://aws.amazon.com/blogs/compute/uploading-to-amazon-s3-directly-from-a-web-or-mobile-application/
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function to get pre-signed URL from S3"
+
+  Verify4kFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda function to determine verify if uploaded file is .MP4 and in 4k based on resolution."
+      Role: !GetAtt LambadExecurtionRoleName.Arn
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      code:
+        ZipFile:
+      Tags:
+        - Key: Lambda
+          Value: 4kVerify
+
+  ApiRootLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 1
+      
+# EC2 Instances
+
+
+# IAM Roles
+
+  VideoConvert-IAMExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 
+             - lambda.amazonaws.com
+             - apigateway.amazonaws.com
+             - malware-protection-plan.guardduty.amazonaws.com
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: anything
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: '*'
+              Resource: '*'
+            - Effect: Allow
+              Action: '*'
+
+              Resource:
+                - Fn::GetAtt:
+                  - ListTrackerDynamoDBTable
+                  - Arn
+                - Fn::Sub: ${ListTrackerDynamoDBTable.Arn}/*
+
+# SNS Topcis
+
+  UserNotifications:
+    Type: AWS::SNS::Topic
+    Properties:
+         PolicyDocument:
+              
+    
+         Topics:
+              - 
+
+
+# SQS Queues
+
+  ListTrackQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ListTrackQueue
+
+  AlarmTopic: 
+    Type: AWS::SNS::Topic
+    Properties: 
+      Subscription: 
+        - 
+          Endpoint: 
+            Ref: "AlarmEmail"
+          Protocol: "email"
+
+
+# CloudWatch 
+
+  QueueDepthAlarm: 
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsDev
+    Properties: 
+      AlarmDescription: "Alarm if queue depth increases to more than 10 messages"
+      Namespace: "AWS/SQS"
+      MetricName: "ApproximateNumberOfMessagesVisible"
+      Dimensions: 
+        - Name: "QueueName"
+          Value: !Ref ListTrackQueue
+      # The below actions represent actions that should be taken when the alarm state changes.
+      AlarmActions:
+           - !Ref AlarmTopic
+      OKActions:
+           - !Ref AlarmTopic
+      InsufficientDataActions:
+           - !Ref AlarmTopic
+      Statistic: "Sum"
+      Period: "300"
+      EvaluationPeriods: "1"
+      Threshold: "10"
+      ComparisonOperator: "GreaterThanThreshold"
+
+
+
+
+Outputs: 
+  QueueURL: 
+    Description: "URL of new Amazon SQS Queue"
+    Value: !Ref ListTrackQueue
+
+  QueueARN: 
+    Description: "ARN of new AmazonSQS Queue"
+    Value: !GetAtt ListTrackQueue.Arn
+
+  QueueName: 
+    Description: "Name of new Amazon SQS Queue"
+    Value: !GetAtt ListTrackQueue.QueueName
