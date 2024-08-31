@@ -23,8 +23,13 @@ Parameters:
     Description: "Email address to notify of operational issues"
     Type: "String"
 
+  AdminNotificationEmail:
+    Default: "{{resolve:ssm:email_address:1}}"
+    Description: "Email address to notify of operational issues"
+    Type: "String"
+
+
 Conditions:
-  IsProd: !Equals [ !Ref EnvironmentType, prod]
   IsDev: !Equals [ !Ref EnvironmentType, dev]
 
 Mappings:
@@ -54,6 +59,7 @@ Resources:
   UploadBucket:
     Type: AWS::S3::Bucket
     Properties:
+      BucketName: !Sub "UploadBucket-${BranchName}-16547896136"
       # AccessControl: --> Legacy, likely not needed. 
       BucketEncryption:
            ServerSideEncryptionConfiguration:
@@ -75,6 +81,12 @@ Resources:
                   TagFilters:
                     - Key: "Is4k"
                       Value: "True"
+      NotificationConfiguration:
+           TopicConfigurations:
+                - Topic: !GetAtt UserNotificationSNS.Arn  # This needs to be the ARN of the SNS Topic that will be notified. 
+                  Event: s3:ObjectCreated:*
+
+
 
 
 # DynamoDB
@@ -128,20 +140,31 @@ Resources:
       Role: !GetAtt VideoConverter-IAMExecutionRole.Arn
       Runtime: python3.10
       Handler: index.handler
-      CodeUri: ../api/ 
+      CodeUri: ../api/ # automatically looks for index.py
       LoggingConfig:
         LogGroup: !Ref ApiRootLogs
 
-  GetSignedURLFunction:
+
+# The below needs some work. 
+  GetSignedURLAPIFunction:
     # https://aws.amazon.com/blogs/compute/uploading-to-amazon-s3-directly-from-a-web-or-mobile-application/
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
-      Description: "Lambda Function to get pre-signed URL from S3"
+      Description: Lambda Function to get pre-signed URL from S3
+      Role: !GetAtt LambdaExecutionRole.ARN
+      CodeUri: ../api/upload_via_presigned_url.py
+      Environment:
+           Variables:
+            BUCKET_NAME: !Ref UploadBucket
+      Handler: upload_via_presigned_url.upload_to_presigned_post
+      Runtime: nodejs16.x
+        
+      
 
   Verify4kFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Description: "Lambda function to determine verify if uploaded file is .MP4 and in 4k based on resolution."
+      Description: Lambda function to determine verify if uploaded file is .MP4 and in 4k based on resolution.
       Role: !GetAtt LambadExecurtionRoleName.Arn
       Runtime: python3.9
       Handler: index.lambda_handler
@@ -193,22 +216,43 @@ Resources:
 
 # SNS Topcis
 
-  UserNotifications:
+  UserNotificationSNS:
     Type: AWS::SNS::Topic
     Properties:
-         PolicyDocument:
-              
-    
-         Topics:
-              - 
+      DisplayName: UserNotifySNSTopic
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AdminNotificationEmail
+        - 
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentType
+        - Key: StackName
+          Value: AWS::StackName
 
+  SystemNotificationSNS:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: BackendNotifySNSTopic
+      Subscription:
+        - Potocol: # TBD 
+          Endpoint: # TBD
+       Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentType
+        - Key: StackName
+          Value: AWS::StackName       
+      
 
 # SQS Queues
 
-  ListTrackQueue: 
+  4kVerificationTriggerSQS:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: ListTrackQueue
+      Visibility Timeout: 220
+      MessageRetentionPeriod: 
+
+      
 
   AlarmTopic: 
     Type: AWS::SNS::Topic
@@ -246,7 +290,7 @@ Resources:
       ComparisonOperator: "GreaterThanThreshold"
 
 
-
+# Outputs
 
 Outputs: 
   QueueURL: 
@@ -260,3 +304,11 @@ Outputs:
   QueueName: 
     Description: "Name of new Amazon SQS Queue"
     Value: !GetAtt ListTrackQueue.QueueName
+
+  ApiEndpoint:
+    Description: "API Gateway endpoint URL for dev stage."
+    Value: !Sub "https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/dev"
+  
+  Bucket_Name:
+    Description: "S3 BucketName"
+    Value: !Ref UploadBucket
