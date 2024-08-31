@@ -5,6 +5,9 @@ auth_creds.sh
 !/api/index.py
 !/api/templates/*
 !/api/requirements.txt
+deployment.sh
+.venv/*
+
 
 # specific environment files for mac
 *.DS_Store 
